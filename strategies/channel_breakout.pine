@@ -1,0 +1,18 @@
+//@version=6
+strategy(title="Прорыв канала",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+length = input.int(title="Length", minval=1, maxval=1000, defval=10)
+upBound = ta.highest(high, length)
+downBound = ta.lowest(low, length)
+if (not na(close[length]))
+	strategy.entry("ChBrkLE", strategy.long, stop=upBound + syminfo.mintick, comment="ChBrkLE")
+strategy.entry("ChBrkSE", strategy.short, stop=downBound - syminfo.mintick, comment="ChBrkSE")

@@ -1,0 +1,22 @@
+//@version=6
+strategy(title="Пересечение MACD",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+fastLength = input(20, "Fast length")
+slowlength = input(34, "Slow length")
+MACDLength = input(12, "MACD length")
+MACD = ta.ema(close, fastLength) - ta.ema(close, slowlength)
+aMACD = ta.ema(MACD, MACDLength)
+delta = MACD - aMACD
+if (ta.crossover(delta, 0))
+	strategy.entry("MacdLE", strategy.long, comment="MacdLE")
+if (ta.crossunder(delta, 0))
+	strategy.entry("MacdSE", strategy.short, comment="MacdSE")

@@ -1,0 +1,20 @@
+//@version=6
+strategy(title="Прорыв уровней пивот (Pivot Extension)",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+leftBars = input(8, "Pivot Lookback Left")
+rightBars = input(4, "Pivot Lookback Right")
+ph = ta.pivothigh(leftBars, rightBars)
+pl = ta.pivotlow(leftBars, rightBars)
+if (not na(pl))
+	strategy.entry("PivExtLE", strategy.long, comment="PivExtLE")
+if (not na(ph))
+	strategy.entry("PivExtSE", strategy.short, comment="PivExtSE")

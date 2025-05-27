@@ -1,0 +1,24 @@
+//@version=6
+strategy(title="Индекс относительной силы (RSI)",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+length = input(21, "Length")
+overSold = input(40, "Oversold")
+overBought = input(80, "Overbought")
+price = close
+vrsi = ta.rsi(price, length)
+co = ta.crossover(vrsi, overSold)
+cu = ta.crossunder(vrsi, overBought)
+if (not na(vrsi))
+	if (co)
+		strategy.entry("RsiLE", strategy.long, comment="RsiLE")
+	if (cu)
+		strategy.entry("RsiSE", strategy.short, comment="RsiSE")

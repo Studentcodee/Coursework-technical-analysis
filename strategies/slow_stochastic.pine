@@ -1,0 +1,26 @@
+//@version=6
+strategy(title="Медленный стохастик",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+length = input.int(7, "Length", minval=1)
+OverBought = input(70, "Overbought")
+OverSold = input(15, "Oversold")
+smoothK = 3
+smoothD = 3
+k = ta.sma(ta.stoch(close, high, low, length), smoothK)
+d = ta.sma(k, smoothD)
+co = ta.crossover(k,d)
+cu = ta.crossunder(k,d)
+if (not na(k) and not na(d))
+	if (co and k < OverSold)
+		strategy.entry("StochLE", strategy.long, comment="StochLE")
+	if (cu and k > OverBought)
+		strategy.entry("StochSE", strategy.short, comment="StochSE")

@@ -1,0 +1,698 @@
+//@version=6
+strategy(title='Адаптивная стратегия',
+         overlay=true,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         initial_capital=100000,
+         slippage=2,
+         commission_type=strategy.commission.percent,
+         commission_value=0.05,
+         risk_free_rate=0,
+         use_bar_magnifier=true,
+         calc_on_every_tick=true)
+
+// === Входные параметры ===
+slippage = input.float(2, 'Slippage (ticks), при сравнении стратегий') // например 0.5 тика
+commPct = input.float(0.05, 'Commission (%), при сравнении стратегий') // 0.1% от notional
+
+// === Helpers ===
+tickSize = syminfo.mintick
+
+// === Определение границ периода ===
+m = month(time)
+q = math.ceil(m / 3)
+is_new_quarter = ta.change(q) != 0
+is_last_bar_of_quarter = q != math.ceil(month(time(timeframe.period, -1)) / 3)
+
+
+// === Моно-стратегии ===
+// MA Crossover
+fastLen = input.int(5, 'Fast MA Length')
+slowLen = input.int(12, 'Slow MA Length')
+maFast = ta.sma(close, fastLen)
+maSlow = ta.sma(close, slowLen)
+sigMA_Long = ta.crossover(maFast, maSlow)
+sigMA_Short = ta.crossunder(maFast, maSlow)
+
+// Channel Breakout
+chanLen = input.int(10, 'Channel Length')
+upB = ta.highest(high, chanLen)[1]
+downB = ta.lowest(low, chanLen)[1]
+sigCH_Long = close > upB
+sigCH_Short = close < downB
+
+// === Сигналы MACD ===
+macdFast     = input.int(20, "MACD Fast Length")
+macdSlow     = input.int(34, "MACD Slow Length")
+macdSignalLp = input.int(12,  "MACD Signal Length")
+MACD    = ta.ema(close, macdFast) - ta.ema(close, macdSlow)
+aMACD   = ta.ema(MACD, macdSignalLp)
+delta   = MACD - aMACD
+sigMACD_Long  = ta.crossover(delta,  0)
+sigMACD_Short = ta.crossunder(delta, 0)
+
+// RSI
+rsiLen      = input.int(21, "RSI Length")
+rsiOS       = input.int(40, "RSI Oversold")
+rsiOB       = input.int(80, "RSI Overbought")
+vrsi        = ta.rsi(close, rsiLen)
+sigRSI_Long = ta.crossover(vrsi, rsiOS)
+sigRSI_Short= ta.crossunder(vrsi, rsiOB)
+
+// === Сигналы Bollinger Bands ===
+bbLen    = input.int(30,   "BB Length",   minval=1)
+bbMult   = input.float(3,  "BB Multiplier", minval=0.001)
+bbSource = close
+bbBasis = ta.sma(bbSource, bbLen)
+bbDev   = bbMult * ta.stdev(bbSource, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+sigBB_Long  = ta.crossover(bbSource, bbLower)
+sigBB_Short = ta.crossunder(bbSource, bbUpper)
+
+// === Расчёт Parabolic SAR и сигналы ===
+start      = input.float(0.02, "SAR Start")
+increment  = input.float(0.02, "SAR Increment")
+maximum    = input.float(0.2,  "SAR Max AF")
+var bool   uptrend       = false
+var float  EP             = na
+var float  SAR            = na
+var float  AF             = start
+var float  nextBarSAR     = na
+if bar_index > 0
+    firstTrendBar = false
+    SAR := nextBarSAR
+
+    if bar_index == 1
+        float prevSAR = na
+		float prevEP = na
+        // инициализация по первому бару
+        lowPrev = low[1]
+		highPrev = high[1]
+		closeCur = close
+		closePrev = close[1]
+        if closeCur > closePrev
+            uptrend := true
+			EP := high
+			prevSAR := lowPrev
+			prevEP := high
+        else
+            uptrend := false
+			EP := low
+			prevSAR := highPrev
+			prevEP := low
+        firstTrendBar := true
+        SAR := prevSAR + start * (prevEP - prevSAR)
+
+    // смена тренда
+    if uptrend
+        if SAR > low
+            firstTrendBar := true
+			uptrend := false
+			SAR := math.max(EP, high)
+			EP := low
+			AF := start
+    else
+        if SAR < high
+            firstTrendBar := true
+			uptrend := true
+			SAR := math.min(EP, low)
+			EP := high
+			AF := start
+
+    // наращиваем AF
+    if not firstTrendBar
+        if uptrend and high > EP
+            EP := high
+			AF := math.min(AF + increment, maximum)
+        else if (not uptrend) and (low < EP)
+            EP := low
+            AF := math.min(AF + increment, maximum)
+
+    // ограничение SAR по минимумам/максимумам
+    if uptrend
+        SAR := math.min(SAR, low[1])
+        if bar_index > 1
+            SAR := math.min(SAR, low[2])
+    else
+        SAR := math.max(SAR, high[1])
+        if bar_index > 1
+            SAR := math.max(SAR, high[2])
+
+    nextBarSAR := SAR + AF * (EP - SAR)
+// сигналы на вход туда, где barstate.isconfirmed в original,
+// но нам нужны только флаги:
+sigSAR_Long  = uptrend == false  and barstate.isconfirmed  // будет переворот => long
+sigSAR_Short = uptrend == true   and barstate.isconfirmed  // переворот => short
+// (альтернативно: ta.change(uptrend) != 0, но оставим оригинальный)
+
+// === Сигналы Pivot Extension ===
+pivLeft   = input.int(8, "Pivot Lookback Left")
+pivRight  = input.int(4, "Pivot Lookback Right")
+ph        = ta.pivothigh(pivLeft, pivRight)
+pl        = ta.pivotlow(pivLeft, pivRight)
+sigPiv_Long  = not na(pl)  // есть нижний пивот — вход в лонг
+sigPiv_Short = not na(ph)  // есть верхний пивот — вход в шорт
+
+// === Сигналы Supertrend ===
+stATR     = input.int(10,     "Supertrend ATR Length")
+stFactor  = input.float(3.0,  "Supertrend Factor", step=0.01)
+[_, st_dir_raw] = ta.supertrend(stFactor, stATR)
+// когда raw меняет знак — это точка входа
+sigST_Long  = ta.change(st_dir_raw) <  0  // разворот вниз→вверх
+sigST_Short = ta.change(st_dir_raw) >  0  // разворот вверх→вниз
+
+// === Параметры Keltner Channels ===
+kcLen      = input.int(20,   "KC Length",   minval=1)
+kcMult     = input.float(2.0,"KC Multiplier")
+kcSrc      = input(close,    "KC Source")
+kcExpMA    = input.bool(true,"KC Use EMA")
+kcBands    = input.string("Average True Range",
+              options=["Average True Range","True Range","Range"],
+              title="KC Bands Style")
+kcATRLn    = input.int(10,   "KC ATR Length")
+// выбираем скользящую
+esma(src, len) =>
+    kcExpMA ? ta.ema(src, len) : ta.sma(src, len)
+
+kcMid      = esma(kcSrc, kcLen)
+kcRange    = kcBands=="True Range"           ? ta.tr(true)
+           : kcBands=="Average True Range"  ? ta.atr(kcATRLn)
+           : ta.rma(high - low, kcLen)
+kcUpper    = kcMid + kcRange * kcMult
+kcLower    = kcMid - kcRange * kcMult
+// формируем буферы пробоя
+var float bprice = na
+var float sprice = na
+bprice := ta.crossover(kcSrc, kcUpper) ? high + syminfo.mintick : nz(bprice[1])
+sprice := ta.crossunder(kcSrc, kcLower)? low  - syminfo.mintick : nz(sprice[1])
+sigKC_Long  = ta.crossover(kcSrc, kcUpper)
+sigKC_Short = ta.crossunder(kcSrc, kcLower)
+
+// === Параметры Slow Stochastic ===
+ssLen       = input.int(7, "Stoch Length", minval=1)
+ssOB        = input.int(70, "Stoch Overbought")
+ssOS        = input.int(15, "Stoch Oversold")
+ssSmoothK   = 3
+ssSmoothD   = 3
+// расчёт %K и %D
+ssK         = ta.sma(ta.stoch(close, high, low, ssLen), ssSmoothK)
+ssD         = ta.sma(ssK, ssSmoothD)
+// сигналы
+sigSS_Long  = ta.crossover(ssK, ssD) and ssK < ssOS
+sigSS_Short = ta.crossunder(ssK, ssD) and ssK > ssOB
+
+
+
+// === Переменные состояния ===
+// объявляем локальные приёмники того же типа
+float tmp_equity = na
+float tmp_entry  = na
+int   tmp_dir    = 0
+
+// MA Crossover
+var float ma_equity = 1.0
+var float ma_entry = na
+var int ma_dir = 0     //  1 = в лонге, -1 = в шорте
+
+// Channel Breakout
+var float ch_equity = 1.0
+var float ch_entry = na
+var int ch_dir = 0
+
+// MACD Cross
+var float macd_equity = 1.0
+var float macd_entry  = na
+var int   macd_dir    = 0   // 1 = long, -1 = short
+
+// RSI Cross
+var float rsi_equity = 1.0
+var float rsi_entry  = na
+var int   rsi_dir    = 0   //  1 = в лонг, -1 = в шорт
+
+// === Переменные для Боллинджера ===
+var float bb_equity = 1.0
+var float bb_entry  = na
+var int   bb_dir    = 0   // 1 = в лонг, -1 = в шорт
+
+// === Переменные для Parabolic SAR ===
+var float sar_equity     = 1.0
+var float sar_entry      = na
+var int   sar_dir        = 0    //  1 = long, -1 = short
+
+// === Переменные для Pivot Extension ===
+var float piv_equity = 1.0
+var float piv_entry  = na
+var int   piv_dir    = 0   // 1 = long, -1 = short
+
+// === Переменные для Supertrend ===
+var float st_equity = 1.0
+var float st_entry  = na
+var int   st_dir    = 0    //  1 = long, -1 = short
+
+// === Переменные для Keltner Channels ===
+var float kc_equity = 1.0
+var float kc_entry  = na
+var int   kc_dir    = 0   // 1 = long, -1 = short
+
+// === Переменные для Slow Stochastic ===
+var float ss_equity = 1.0
+var float ss_entry  = na
+var int   ss_dir    = 0   // 1 = long, -1 = short
+
+
+// === Добавляем счётчики выбора ===
+var int cntMA   = 0
+var int cntCH   = 0
+var int cntMACD = 0
+var int cntRSI  = 0
+var int cntBB   = 0
+var int cntSAR  = 0
+var int cntPIV  = 0
+var int cntST   = 0
+var int cntKC   = 0
+var int cntSS   = 0
+
+// Переменная для хранения выбранной стратегии (0 - нет, 1 - MA Cross, 2 - Channel Break)
+var int selected_strategy = 0 // 1 = MA, 2 = Channel
+
+
+// === Функция учёта одной сделки ===
+f_apply_trade(equity, entry, exit, longDir) =>
+    // gross return
+    float ret = longDir == 1 ? (exit - entry) / entry : (entry - exit) / entry
+    // учёт комиссии на вход и выход
+    float comm = commPct / 100 * (entry + exit)
+    // итоговый множитель
+    float newEquity = equity * (1 + ret - comm)
+    float newEntry = na
+    int newDir = 0
+
+    [newEquity, newEntry, newDir]
+
+
+
+// === Логика MA ===
+if sigMA_Long and ma_dir == 0
+    // входим в long по цене + slippage
+    ma_entry := close + slippage * tickSize
+    ma_dir   :=  1
+
+if sigMA_Short and ma_dir == 0
+    ma_entry := close - slippage * tickSize
+    ma_dir   := -1
+
+// выход по противоположному сигналу или EoM
+if (ma_dir ==  1 and sigMA_Short)
+     or (ma_dir == -1 and sigMA_Long)
+     or (ma_dir != 0 and is_last_bar_of_quarter)
+    // выбираем цену выхода с учётом проскальзывания
+    exitPrice = ma_dir == 1
+         ? (close - slippage*tickSize)   // выход из лонга
+         : (close + slippage*tickSize)   // выход из шорт
+    // применяем ф-ю расчёта сделки
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         ma_equity, ma_entry, exitPrice,
+         longDir = ma_dir
+     )
+    ma_equity := tmp_equity
+    ma_entry  := tmp_entry
+    ma_dir    := tmp_dir
+
+
+
+// === Логика Channel ===
+if sigCH_Long and ch_dir == 0
+    ch_entry := upB
+    ch_dir   :=  1
+
+if sigCH_Short and ch_dir == 0
+    ch_entry := downB
+    ch_dir   := -1
+
+// Выход
+if (ch_dir ==  1 and sigCH_Short)
+     or (ch_dir == -1 and sigCH_Long)
+     or (ch_dir != 0 and is_last_bar_of_quarter)
+    // выбираем цену выхода с учётом проскальзывания
+    exitPrice = ch_dir == 1
+         ? (close - slippage*tickSize)
+         : (close + slippage*tickSize)
+    // применяем ф-ю расчёта сделки
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         ch_equity, ch_entry, exitPrice,
+         longDir = ch_dir
+     )
+    ch_equity := tmp_equity
+    ch_entry  := tmp_entry
+    ch_dir    := tmp_dir
+
+
+
+// === Логика MACD Cross ===
+if sigMACD_Long and macd_dir == 0
+    // входим в long (без дополнительного проскальзывания)
+    macd_entry := close + slippage * tickSize
+    macd_dir   :=  1
+
+if sigMACD_Short and macd_dir == 0
+    macd_entry := close - slippage * tickSize
+    macd_dir   := -1
+
+// условие выхода — противоположный сигнал или конец месяца
+if (macd_dir ==  1 and sigMACD_Short) or
+     (macd_dir == -1 and sigMACD_Long)  or
+     (macd_dir != 0   and is_last_bar_of_quarter)
+    // цена выхода с учётом проскальзывания
+    exitPrice = macd_dir == 1
+         ? close - slippage*tickSize
+         : close + slippage*tickSize
+
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         macd_equity, macd_entry, exitPrice,
+         longDir = macd_dir
+     )
+    macd_equity := tmp_equity
+    macd_entry  := tmp_entry
+    macd_dir    := tmp_dir
+
+
+
+// === Логика RSI ===
+if sigRSI_Long and rsi_dir == 0
+    rsi_entry := close + slippage * tickSize
+    rsi_dir   :=  1
+
+if sigRSI_Short and rsi_dir == 0
+    rsi_entry := close - slippage * tickSize
+    rsi_dir   := -1
+
+// Выход по противоположному сигналу или концу месяца
+if (rsi_dir ==  1 and sigRSI_Short) or
+     (rsi_dir == -1 and sigRSI_Long)  or
+     (rsi_dir != 0 and is_last_bar_of_quarter)
+    exitPrice = rsi_dir == 1
+         ? (close - slippage*tickSize)
+         : (close + slippage*tickSize)
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         rsi_equity, rsi_entry, exitPrice,
+         longDir = rsi_dir
+     )
+    rsi_equity := tmp_equity
+    rsi_entry  := tmp_entry
+    rsi_dir    := tmp_dir
+
+
+// === Логика Bollinger Bands ===
+if sigBB_Long and bb_dir == 0
+    bb_entry := bbLower
+    bb_dir   :=  1
+
+if sigBB_Short and bb_dir == 0
+    bb_entry := bbUpper
+    bb_dir   := -1
+
+// условие выхода — противоположный сигнал или конец месяца
+if (bb_dir ==  1 and sigBB_Short) or
+     (bb_dir == -1 and sigBB_Long)  or
+     (bb_dir != 0 and is_last_bar_of_quarter)
+    // цена выхода, можно учесть slippage аналогично другим
+    exitPrice = bb_dir == 1
+         ? (close - slippage*tickSize)
+         : (close + slippage*tickSize)
+
+    // обновляем equity через вашу функцию
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         bb_equity, bb_entry, exitPrice,
+         longDir = bb_dir
+     )
+    bb_equity := tmp_equity
+    bb_entry  := tmp_entry
+    bb_dir    := tmp_dir
+
+
+// === Логика Parabolic SAR ===
+if sigSAR_Long and sar_dir == 0
+    sar_entry := nextBarSAR  // вход по отложке на nextBarSAR
+    sar_dir   :=  1
+
+if sigSAR_Short and sar_dir == 0
+    sar_entry := nextBarSAR
+    sar_dir   := -1
+
+// выход по противоположному сигналу или концу периода
+if (sar_dir ==  1 and sigSAR_Short) or
+     (sar_dir == -1 and sigSAR_Long)  or
+     (sar_dir != 0 and is_last_bar_of_quarter)
+    // учитываем проскальзывание так же:
+    exitPrice = sar_dir == 1
+         ? (close - slippage*tickSize)
+         : (close + slippage*tickSize)
+
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         sar_equity, sar_entry, exitPrice,
+         longDir = sar_dir
+     )
+    sar_equity := tmp_equity
+    sar_entry  := tmp_entry
+    sar_dir    := tmp_dir
+
+
+// === Логика Pivot Extension ===
+if sigPiv_Long and piv_dir == 0
+    // входим по цене пивота (локально market-тип)
+    piv_entry := pl
+    piv_dir   :=  1
+
+if sigPiv_Short and piv_dir == 0
+    piv_entry := ph
+    piv_dir   := -1
+
+// условие выхода: противоположный пивот или конец периода
+if (piv_dir ==  1 and sigPiv_Short) or
+     (piv_dir == -1 and sigPiv_Long)  or
+     (piv_dir != 0 and is_last_bar_of_quarter)
+    // выход по close (с учётом market-стиля)
+    exitPrice = close + (piv_dir == 1 ? -slippage*tickSize : +slippage*tickSize)
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         piv_equity, piv_entry, exitPrice,
+         longDir = piv_dir
+     )
+    piv_equity := tmp_equity
+    piv_entry  := tmp_entry
+    piv_dir    := tmp_dir
+
+
+// === Логика Supertrend ===
+if sigST_Long and st_dir == 0
+    // входим на закрытии бара (market)
+    st_entry := close + slippage * tickSize
+    st_dir   :=  1
+
+if sigST_Short and st_dir == 0
+    st_entry := close - slippage * tickSize
+    st_dir   := -1
+
+// выход по противоположному сигналу или концу периода
+if (st_dir ==  1 and sigST_Short) or
+     (st_dir == -1 and sigST_Long)  or
+     (st_dir != 0 and is_last_bar_of_quarter)
+    exitPrice = close + (st_dir == 1 ? -slippage*tickSize : +slippage*tickSize)
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         st_equity, st_entry, exitPrice,
+         longDir = st_dir
+     )
+    st_equity := tmp_equity
+    st_entry  := tmp_entry
+    st_dir    := tmp_dir
+
+
+// === Логика Keltner Channels ===
+if sigKC_Long and kc_dir == 0
+    kc_entry := bprice
+    kc_dir   :=  1
+
+if sigKC_Short and kc_dir == 0
+    kc_entry := sprice
+    kc_dir   := -1
+
+// выход — противоположный пробой или конец периода
+if (kc_dir ==  1 and sigKC_Short) or
+     (kc_dir == -1 and sigKC_Long)  or
+     (kc_dir != 0 and is_last_bar_of_quarter)
+    exitPrice = close + (kc_dir == 1 ? -slippage*tickSize : +slippage*tickSize)
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         kc_equity, kc_entry, exitPrice,
+         longDir = kc_dir
+     )
+    kc_equity := tmp_equity
+    kc_entry  := tmp_entry
+    kc_dir    := tmp_dir
+
+
+// === Логика Slow Stochastic ===
+if sigSS_Long and ss_dir == 0
+    ss_entry := close + slippage * tickSize
+    ss_dir   :=  1
+
+if sigSS_Short and ss_dir == 0
+    ss_entry := close - slippage * tickSize
+    ss_dir   := -1
+
+// условие выхода: противоположный сигнал или конец периода
+if (ss_dir ==  1 and sigSS_Short) or
+     (ss_dir == -1 and sigSS_Long ) or
+     (ss_dir != 0   and is_last_bar_of_quarter)
+    exitPrice = close + (ss_dir == 1 ? -slippage*tickSize : +slippage*tickSize)
+    [tmp_equity, tmp_entry, tmp_dir] = f_apply_trade(
+         ss_equity, ss_entry, exitPrice,
+         longDir = ss_dir
+     )
+    ss_equity := tmp_equity
+    ss_entry  := tmp_entry
+    ss_dir    := tmp_dir
+
+
+
+// === Выбор адаптивной стратегии в начале месяца ===
+if is_new_quarter
+    // 1) выбираем стратегию с наибольшим произведением доходностей
+    selected_strategy :=
+         ma_equity   >= ch_equity  and ma_equity   >= macd_equity and ma_equity   >= rsi_equity  and ma_equity   >= bb_equity  and ma_equity   >= sar_equity and ma_equity   >= piv_equity and ma_equity   >= st_equity  and ma_equity   >= kc_equity and ma_equity   >= ss_equity ? 1 :
+         ch_equity   >= ma_equity  and ch_equity   >= macd_equity and ch_equity   >= rsi_equity  and ch_equity   >= bb_equity  and ch_equity   >= sar_equity and ch_equity   >= piv_equity and ch_equity   >= st_equity  and ch_equity   >= kc_equity and ch_equity   >= ss_equity ? 2 :
+         macd_equity >= ma_equity  and macd_equity >= ch_equity   and macd_equity >= rsi_equity  and macd_equity >= bb_equity  and macd_equity >= sar_equity and macd_equity >= piv_equity and macd_equity >= st_equity  and macd_equity >= kc_equity and macd_equity >= ss_equity ? 3 :
+         rsi_equity  >= ma_equity  and rsi_equity  >= ch_equity   and rsi_equity  >= macd_equity and rsi_equity  >= bb_equity  and rsi_equity  >= sar_equity and rsi_equity  >= piv_equity and rsi_equity  >= st_equity  and rsi_equity  >= kc_equity and rsi_equity  >= ss_equity ? 4 :
+         bb_equity   >= ma_equity  and bb_equity   >= ch_equity   and bb_equity   >= macd_equity and bb_equity   >= rsi_equity and bb_equity   >= sar_equity and bb_equity   >= piv_equity and bb_equity   >= st_equity  and bb_equity   >= kc_equity and bb_equity   >= ss_equity ? 5 :
+         sar_equity  >= ma_equity  and sar_equity  >= ch_equity   and sar_equity  >= macd_equity and sar_equity  >= rsi_equity and sar_equity  >= bb_equity  and sar_equity  >= piv_equity and sar_equity  >= st_equity  and sar_equity  >= kc_equity and sar_equity  >= ss_equity ? 6 :
+         piv_equity  >= ma_equity  and piv_equity  >= ch_equity   and piv_equity  >= macd_equity and piv_equity  >= rsi_equity and piv_equity  >= bb_equity  and piv_equity  >= sar_equity and piv_equity  >= st_equity  and piv_equity  >= kc_equity and piv_equity  >= ss_equity ? 7 :
+         st_equity   >= ma_equity  and st_equity   >= ch_equity   and st_equity   >= macd_equity and st_equity   >= rsi_equity and st_equity   >= bb_equity  and st_equity   >= sar_equity and st_equity   >= piv_equity and st_equity   >= kc_equity and st_equity   >= ss_equity ? 8 :
+         kc_equity   >= ma_equity  and kc_equity   >= ch_equity   and kc_equity   >= macd_equity and kc_equity   >= rsi_equity and kc_equity   >= bb_equity  and kc_equity   >= sar_equity and kc_equity   >= piv_equity and kc_equity   >= st_equity and kc_equity   >= ss_equity ? 9 : 10
+
+    switch selected_strategy
+        1 => cntMA   += 1
+        2 => cntCH   += 1
+        3 => cntMACD += 1
+        4 => cntRSI  += 1
+        5 => cntBB   += 1
+        6 => cntSAR  += 1
+        7 => cntPIV  += 1
+        8 => cntST   += 1
+        9 => cntKC   += 1
+        10 => cntSS  += 1
+
+    // 3) сбрасываем всё
+    ma_equity   := 1.0
+    ch_equity   := 1.0
+    rsi_equity  := 1.0
+    macd_equity := 1.0
+    bb_equity   := 1.0
+    sar_equity  := 1.0
+    piv_equity  := 1.0
+    st_equity   := 1.0
+    kc_equity   := 1.0
+    ss_equity   := 1.0
+
+
+
+// === Применение выбранной стратегии ===
+if selected_strategy == 1
+    // MA Crossover
+    if sigMA_Long
+        strategy.entry('MA_Long', strategy.long)
+    if sigMA_Short
+        strategy.entry('MA_Short', strategy.short)
+else if selected_strategy == 2
+    // Channel BreakOut
+    if sigCH_Long
+        strategy.entry('CH_Long',  strategy.long,  stop = upB)
+    if sigCH_Short
+        strategy.entry('CH_Short', strategy.short, stop = downB)
+else if selected_strategy == 4
+    // MACD
+    if sigMACD_Long
+        strategy.entry("MACD_LE", strategy.long)
+    if sigMACD_Short
+        strategy.entry("MACD_SE", strategy.short)
+else if selected_strategy == 3
+    // MACD
+    if sigMACD_Long
+        strategy.entry("MACD_LE", strategy.long)
+    if sigMACD_Short
+        strategy.entry("MACD_SE", strategy.short)
+else if selected_strategy == 4
+    // RSI
+    if sigRSI_Long
+        strategy.entry('RSI_Long',  strategy.long)
+    if sigRSI_Short
+        strategy.entry('RSI_Short', strategy.short)
+else if selected_strategy == 5
+    // Bollinger
+    if sigBB_Long
+        strategy.entry("BBandLE", strategy.long,  stop=bbLower, oca_name="BB", oca_type=strategy.oca.cancel)
+    if sigBB_Short
+        strategy.entry("BBandSE", strategy.short, stop=bbUpper, oca_name="BB", oca_type=strategy.oca.cancel)
+else if selected_strategy == 6
+    // SAR
+    if sigSAR_Long
+        strategy.entry("ParLE", strategy.long,  stop=nextBarSAR, comment="ParLE")
+    if sigSAR_Short
+        strategy.entry("ParSE", strategy.short, stop=nextBarSAR, comment="ParSE")
+else if selected_strategy == 7
+    // Pivot Extension
+    if sigPiv_Long
+        strategy.entry("PivExtLE", strategy.long,  comment="PivExtLE")
+    if sigPiv_Short
+        strategy.entry("PivExtSE", strategy.short, comment="PivExtSE")
+else if selected_strategy == 8
+    // Supertrend
+    if sigST_Long
+        strategy.entry("ST_Long",  strategy.long)
+    if sigST_Short
+        strategy.entry("ST_Short", strategy.short)
+else if selected_strategy == 9
+    // Keltner Channels
+    if sigKC_Long
+        strategy.entry("KltChLE", strategy.long, stop=bprice, comment="KltChLE")
+    if sigKC_Short
+        strategy.entry("KltChSE", strategy.short, stop=sprice, comment="KltChSE")
+else if selected_strategy == 10
+    // Slow Stochastic
+    if sigSS_Long
+        strategy.entry("StochLE", strategy.long,  comment="StochLE")
+    if sigSS_Short
+        strategy.entry("StochSE", strategy.short, comment="StochSE")
+
+
+
+// ─── Показ equity на графике ───────────────────────────
+plot(ma_equity,   color=color.blue,   title="MA equity")
+plot(ch_equity,   color=color.red,    title="CH equity")
+plot(macd_equity, color=color.orange, title="MACD equity")
+plot(rsi_equity,  color=color.green,  title="RSI equity")
+plot(bb_equity,   color=color.yellow, title="BB equity")
+plot(sar_equity,  color=color.purple, title="SAR equity")
+plot(piv_equity,  color=color.teal,   title="PIV equity")
+plot(st_equity,   color=color.olive,  title="ST equity")
+plot(kc_equity,   color=color.maroon, title="KC equity")
+plot(ss_equity,   color=color.navy,   title="SS equity")
+// ────────────────────────────────────────────────────────
+
+
+// === 3. Рисуем табличку с результатами ===
+var table tbl = table.new(position.bottom_right, 10, 1, frame_color=color.gray, border_width=1)
+if barstate.islast
+    table.cell(tbl, 0, 0, text="MA Cross:    " + str.tostring(cntMA),   text_color=color.blue)
+    table.cell(tbl, 1, 0, text="Channel:     " + str.tostring(cntCH),   text_color=color.red)
+    table.cell(tbl, 2, 0, text="MACD:        " + str.tostring(cntMACD), text_color=color.orange)
+    table.cell(tbl, 3, 0, text="RSI:         " + str.tostring(cntRSI),  text_color=color.green)
+    table.cell(tbl, 4, 0, text="Bollinger:   " + str.tostring(cntBB),   text_color=color.yellow)
+    table.cell(tbl, 5, 0, text="SAR:         " + str.tostring(cntSAR),  text_color=color.purple)
+    table.cell(tbl, 6, 0, text="PivotExt:    " + str.tostring(cntPIV),  text_color=color.teal)
+    table.cell(tbl, 7, 0, text="Supertrend:  " + str.tostring(cntST),   text_color=color.olive)
+    table.cell(tbl, 8, 0, text="Keltner:     " + str.tostring(cntKC),   text_color=color.maroon)
+    table.cell(tbl, 9, 0, text="SlowStoch:   " + str.tostring(cntSS),   text_color=color.navy)
+
+
+// === Закрытие всех позиций в конце месяца ===
+if is_last_bar_of_quarter and strategy.position_size != 0
+    strategy.close_all(comment = 'End of Quarter')

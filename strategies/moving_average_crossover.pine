@@ -1,0 +1,21 @@
+//@version=6
+strategy(title="Пересечение 2 линий скользящих средних",
+		 overlay=true,
+		 default_qty_type=strategy.percent_of_equity,
+		 default_qty_value=100,
+		 initial_capital=100000,
+		 slippage=2,
+		 commission_type=strategy.commission.percent,
+		 commission_value=0.05,
+		 risk_free_rate=0,
+		 use_bar_magnifier=true)
+
+fastLength = input(5)
+slowLength = input(12)
+price = close
+mafast = ta.sma(price, fastLength)
+maslow = ta.sma(price, slowLength)
+if (ta.crossover(mafast, maslow))
+	strategy.entry("MA2CrossLE", strategy.long, comment="MA2CrossLE")
+if (ta.crossunder(mafast, maslow))
+	strategy.entry("MA2CrossSE", strategy.short, comment="MA2CrossSE")
